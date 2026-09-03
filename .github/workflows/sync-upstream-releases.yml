@@ -1,0 +1,49 @@
+name: Sync upstream releases
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM: alireza0/s-ui
+      TARGET: ${{ github.repository }}
+    steps:
+      - name: Mirror missing upstream releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh api --paginate "repos/${UPSTREAM}/releases?per_page=100" > upstream-releases.json
+          jq -r '.[] | select(.draft == false) | .id' upstream-releases.json | while read -r release_id; do
+            upstream_release=$(jq --argjson id "$release_id" '.[] | select(.id == $id)' upstream-releases.json)
+            tag=$(jq -r '.tag_name' <<<"$upstream_release")
+
+            if gh release view "$tag" --repo "$TARGET" >/dev/null 2>&1; then
+              echo "Release ${tag} already exists; skipping."
+              continue
+            fi
+
+            name=$(jq -r '.name // ""' <<<"$upstream_release")
+            body=$(jq -r '.body // ""' <<<"$upstream_release")
+            prerelease=$(jq -r '.prerelease' <<<"$upstream_release")
+            target=$(jq -r '.target_commitish // "main"' <<<"$upstream_release")
+            args=("$tag" --repo "$TARGET" --title "$name" --notes "$body" --target "$target")
+            [ "$prerelease" = true ] && args+=(--prerelease)
+            gh release create "${args[@]}"
+
+            release_dir="assets/${tag}"
+            mkdir -p "$release_dir"
+            jq -r '.assets[] | [.url, .name] | @tsv' <<<"$upstream_release" | while IFS=$'\t' read -r url filename; do
+              echo "Downloading ${filename}"
+              gh api "$url" -H 'Accept: application/octet-stream' > "$release_dir/$filename"
+            done
+            find "$release_dir" -maxdepth 1 -type f -print0 | xargs -0 -r gh release upload "$tag" --repo "$TARGET" --clobber
+          done
